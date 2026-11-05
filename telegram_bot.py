@@ -42,12 +42,16 @@ log = logging.getLogger("LumoNewsTG")
 # Token provided by owner — keep private on the host.
 TOKEN = os.getenv(
     "TELEGRAM_BOT_TOKEN",
-    "9039398570:AAHOzrY42xDjl2_54CjgvwToZKLt6Aq7oiM",
+    os.getenv("BOT_TOKEN", os.getenv("TELEGRAM_TOKEN", os.getenv("TOKEN", "9039398570:AAHOzrY42xDjl2_54CjgvwToZKLt6Aq7oiM"))),
 ).strip()
 
-# Comma-separated Telegram numeric user IDs. Empty = first /setadmin claim works once.
-ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "8990071284").strip()
-ADMIN_IDS: set[int] = set()
+BOT_USERNAME = os.getenv("BOT_USERNAME", "LumoTel_Bot").lstrip("@")
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "LumoNews_Shop").lstrip("@")
+CHANNEL_LINK = f"https://t.me/{CHANNEL_USERNAME}"
+
+# Main admin (owner). Extra IDs via ADMIN_IDS env (comma-separated).
+ADMIN_IDS: set[int] = {8990071284}
+ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "").strip()
 for part in ADMIN_IDS_RAW.split(","):
     part = part.strip()
     if part.isdigit():
@@ -358,41 +362,98 @@ async def get_values_struct(force: bool = False) -> dict[str, Any]:
     return structured
 
 
-async def send_chunks_chat(bot, chat_id: int, chunks: list[str]) -> bool:
+async def send_chunks_chat(bot, chat_id: Any, chunks: list[str]) -> bool:
     ok = True
     for chunk in chunks:
+        body = (chunk or "—")[:4000]
+        # branding
+        body = body.replace("@LumoNews_Bot", f"@{BOT_USERNAME}").replace("@LumoNews", f"@{CHANNEL_USERNAME}")
         try:
-            await bot.send_message(chat_id, chunk[:4000])
+            await bot.send_message(chat_id, body)
         except Exception as exc:
             log.warning("send %s failed: %s", chat_id, exc)
             ok = False
     return ok
 
 
-def collect_broadcast_targets() -> list[int]:
-    targets: list[int] = []
-    seen: set[int] = set()
+def collect_broadcast_targets(*, only_groups_channels: bool = False) -> list[Any]:
+    """Return destinations for auto posts / admin broadcast.
+
+    Supports numeric chat ids and public @channel usernames stored in subscriptions.
+    """
+    targets: list[Any] = []
+    seen: set[str] = set()
 
     def add(raw: Any) -> None:
-        try:
-            tid = int(raw)
-        except (TypeError, ValueError):
+        if raw is None:
             return
-        if tid in seen:
+        if isinstance(raw, int):
+            key = str(raw)
+            val: Any = raw
+        else:
+            s = str(raw).strip()
+            if not s:
+                return
+            if s.startswith("@"):
+                key = s.lower()
+                val = s if s.startswith("@") else f"@{s}"
+            elif s.lstrip("-").isdigit():
+                key = str(int(s))
+                val = int(s)
+            else:
+                # bare channel username
+                key = f"@{s}".lower()
+                val = f"@{s}"
+        if key in seen:
             return
-        seen.add(tid)
-        targets.append(tid)
+        if only_groups_channels:
+            # private users are positive ints; groups/channels are negative or @username
+            if isinstance(val, int) and val > 0:
+                return
+        seen.add(key)
+        targets.append(val)
+
+    # Always include the official shop channel
+    add(f"@{CHANNEL_USERNAME}")
 
     for key, sub in (DB.get("subscriptions") or {}).items():
-        if isinstance(sub, dict):
-            add(key)
-    for key, info in (DB.get("users") or {}).items():
-        if not isinstance(info, dict):
+        if not isinstance(sub, dict):
             continue
-        if info.get("started") is False:
+        expires = int(sub.get("expires_at") or 0)
+        if expires and expires <= int(time.time()):
             continue
-        add(info.get("chat_id") or key)
+        add(sub.get("chat_id") or key)
+        if sub.get("username"):
+            add(sub.get("username") if str(sub.get("username")).startswith("@") else f"@{sub.get('username')}")
+
+    if not only_groups_channels:
+        for key, info in (DB.get("users") or {}).items():
+            if not isinstance(info, dict):
+                continue
+            if info.get("started") is False:
+                continue
+            add(info.get("chat_id") or key)
     return targets
+
+
+def ensure_default_channel_subscription() -> None:
+    """Register the official LumoNews channel for automatic stock/values posts."""
+    subs = DB.setdefault("subscriptions", {})
+    key = f"@{CHANNEL_USERNAME}"
+    # also store under username form
+    if key not in subs and CHANNEL_USERNAME not in subs:
+        subs[key] = {
+            "owner_id": "system",
+            "stock": True,
+            "values": True,
+            "type": "channel",
+            "username": CHANNEL_USERNAME,
+            "title": "LumoNews Shop",
+            "link": CHANNEL_LINK,
+            "added_at": int(time.time()),
+        }
+        save_db()
+        log.info("Default channel subscription ensured: %s", key)
 
 
 async def notify_admins(bot, text: str) -> bool:
@@ -416,12 +477,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         f"سلام {name} عزیز! 🎉\n\n"
         f"👥 کاربران: {count:,} نفر\n\n"
-        "به ربات 🤖 LumoNews خوش اومدی.\n\n"
+        f"به ربات 🤖 @{BOT_USERNAME} خوش اومدی.\n\n"
         "📦 استاک الان — استاک فعلی\n"
         "💎 ولیو میوه‌ها — ارزش آیتم‌ها\n"
-        "🛍 خدمات بلاکس فروت — ثبت درخواست\n\n"
+        "🛍 خدمات بلاکس فروت — ثبت درخواست\n"
+        "🔗 اتصال کانال/گپ — استاک خودکار\n\n"
+        f"📢 کانال: @{CHANNEL_USERNAME}\n"
         "👑 سازنده: @Orginal_Lumo\n"
-        "🤖 LumoNews"
+        f"🤖 @{BOT_USERNAME}"
     )
     await safe_reply(update, text, reply_markup=main_keyboard(uid))
 
@@ -436,6 +499,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/fruits /permanent /limiteds /gamepasses\n"
         "/id — شناسه تلگرام شما\n"
         "/services — خدمات بلاکس فروت\n"
+        "/connect @channel — اتصال کانال برای استاک خودکار\n"
+        "/subscribe — اتصال همین گپ\n"
+        "/mysubs — لیست مقصدهای متصل\n"
+        f"/unsubscribe — قطع اتصال\n\n"
+        f"🤖 @{BOT_USERNAME}\n📢 @{CHANNEL_USERNAME}"
     )
     if is_admin(uid):
         text += (
@@ -473,7 +541,8 @@ async def cmd_stock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         data = await get_stock_cached()
         for chunk in format_stock_message(data):
-            await safe_reply(update, chunk.replace("@LumoNews_Bot", "LumoNews TG").replace("@LumoNews", "LumoNews"))
+            body = chunk.replace("@LumoNews_Bot", f"@{BOT_USERNAME}").replace("@LumoNews", f"@{CHANNEL_USERNAME}")
+            await safe_reply(update, body)
     except Exception as exc:
         await safe_reply(update, f"⚠️ استاک در دسترس نیست.\n{exc}")
 
@@ -792,6 +861,136 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
 
+
+async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Connect current group/channel or a given @channel for auto stock/values."""
+    uid, cid = remember_user(update)
+    chat = update.effective_chat
+    target: Any = None
+    title = ""
+    if context.args:
+        arg = context.args[0].strip()
+        if arg.startswith("https://t.me/"):
+            arg = arg.rstrip("/").split("/")[-1]
+        if not arg.startswith("@"):
+            arg = f"@{arg}"
+        target = arg
+        title = arg
+    elif chat and chat.type in ("group", "supergroup", "channel"):
+        target = cid
+        title = getattr(chat, "title", "") or str(cid)
+    else:
+        await safe_reply(
+            update,
+            "🔗 اتصال کانال / گپ\n\n"
+            "۱) ربات را ادمین کانال یا عضو گپ کن (با اجازه ارسال پیام).\n"
+            "۲) داخل گپ بزن: /subscribe\n"
+            f"۳) یا اینجا بنویس: /connect @{CHANNEL_USERNAME}\n\n"
+            f"کانال رسمی: {CHANNEL_LINK}",
+        )
+        return
+
+    subs = DB.setdefault("subscriptions", {})
+    key = str(target)
+    subs[key] = {
+        "owner_id": str(uid),
+        "stock": True,
+        "values": True,
+        "type": getattr(chat, "type", "channel") if chat else "channel",
+        "title": title,
+        "chat_id": target,
+        "username": str(target).lstrip("@") if str(target).startswith("@") else "",
+        "added_at": int(time.time()),
+    }
+    save_db()
+
+    # test send
+    try:
+        await context.bot.send_message(
+            target,
+            f"🔗 @{BOT_USERNAME} وصل شد.\nاز این به بعد استاک و ولیو به‌صورت خودکار اینجا ارسال می‌شود.\n📢 @{CHANNEL_USERNAME}",
+        )
+        test_ok = True
+    except Exception as exc:
+        test_ok = False
+        await safe_reply(
+            update,
+            f"⚠️ مقصد ذخیره شد ولی ارسال تست ناموفق بود.\n"
+            f"مطمئن شو ربات ادمین کانال است و اجازه Post دارد.\n"
+            f"جزئیات: {exc}",
+        )
+        return
+
+    # initial stock snapshot
+    try:
+        data = await get_stock_cached(force=True)
+        chunks = format_stock_message(data)
+        await send_chunks_chat(context.bot, target, chunks)
+    except Exception as exc:
+        log.warning("initial stock to %s: %s", target, exc)
+
+    await safe_reply(
+        update,
+        f"✅ اتصال برقرار شد.\nمقصد: {title}\nاستاک: روشن | ولیو: روشن\n"
+        f"{'ارسال تست موفق بود.' if test_ok else ''}",
+    )
+
+
+async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await cmd_connect(update, context)
+
+
+async def cmd_mysubs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid, _ = remember_user(update)
+    lines = ["📢 اشتراک‌های متصل:"]
+    n = 0
+    for key, sub in (DB.get("subscriptions") or {}).items():
+        if not isinstance(sub, dict):
+            continue
+        if str(sub.get("owner_id")) not in (str(uid), "system") and not is_admin(uid):
+            continue
+        n += 1
+        lines.append(
+            f"• {sub.get('title') or key}\n"
+            f"  stock={sub.get('stock')} values={sub.get('values')}"
+        )
+    if n == 0:
+        lines.append("موردی نیست. با /connect وصل کن.")
+    await safe_reply(update, "\n".join(lines))
+
+
+async def cmd_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid, cid = remember_user(update)
+    target = None
+    if context.args:
+        target = context.args[0].strip()
+        if target.startswith("https://t.me/"):
+            target = "@" + target.rstrip("/").split("/")[-1]
+        if not target.startswith("@") and not target.lstrip("-").isdigit():
+            target = f"@{target}"
+    else:
+        chat = update.effective_chat
+        if chat and chat.type in ("group", "supergroup", "channel"):
+            target = str(cid)
+    if not target:
+        await safe_reply(update, "فرمت:\n/unsubscribe @channel\nیا داخل گپ: /unsubscribe")
+        return
+    subs = DB.setdefault("subscriptions", {})
+    removed = False
+    for key in list(subs.keys()):
+        if key == target or key == str(target) or subs[key].get("chat_id") == target:
+            if str(subs[key].get("owner_id")) not in (str(uid), "system") and not is_admin(uid):
+                await safe_reply(update, "⛔️ این مقصد مال تو نیست.")
+                return
+            if key == f"@{CHANNEL_USERNAME}" or key == CHANNEL_USERNAME:
+                await safe_reply(update, "کانال رسمی را نمی‌توان حذف کرد.")
+                return
+            del subs[key]
+            removed = True
+    save_db()
+    await safe_reply(update, "✅ قطع شد." if removed else "موردی پیدا نشد.")
+
+
 async def monitor_loop(app: Application) -> None:
     log.info("Monitor started")
     last_values = 0.0
@@ -812,14 +1011,14 @@ async def monitor_loop(app: Application) -> None:
                         chunks = format_stock_message(stock)
                         prefix = "📈 استاک تغییر کرد!\n"
                         body = [(prefix + chunks[0])] + chunks[1:]
-                        for target in collect_broadcast_targets():
-                            # only groups/channels (negative ids) auto stock
-                            if int(target) >= 0:
-                                continue
-                            await send_chunks_chat(app.bot, int(target), body)
+                        targets = collect_broadcast_targets(only_groups_channels=True)
+                        ok_n = 0
+                        for target in targets:
+                            if await send_chunks_chat(app.bot, target, body):
+                                ok_n += 1
                         DB["meta"]["stock_signature"] = sig
                         save_db()
-                        log.info("Stock change broadcast done")
+                        log.info("Stock change broadcast done targets=%s ok=%s", len(targets), ok_n)
             except Exception as exc:
                 log.warning("stock monitor: %s", exc)
 
@@ -851,12 +1050,11 @@ async def monitor_loop(app: Application) -> None:
                                     title="🔔 ولیو تغییر کرد!\n🍎 میوه‌ها\n🤖 LumoNews",
                                     footer="🤖 LumoNews",
                                 )
-                                for target in collect_broadcast_targets():
-                                    if int(target) >= 0:
-                                        continue
-                                    await send_chunks_chat(app.bot, int(target), chunks)
+                                targets = collect_broadcast_targets(only_groups_channels=True)
+                                for target in targets:
+                                    await send_chunks_chat(app.bot, target, chunks)
                                 DB["meta"]["values_change_detected_at"] = int(time.time())
-                                log.info("Values broadcast: %s", reason)
+                                log.info("Values broadcast: %s targets=%s", reason, len(targets))
                             else:
                                 log.info("Values skip: %s", reason)
                             save_db()
@@ -867,18 +1065,77 @@ async def monitor_loop(app: Application) -> None:
         await asyncio.sleep(POLL_SECONDS)
 
 
+async def resolve_official_channel(bot) -> None:
+    """Resolve @channel to numeric id when bot is already admin there."""
+    ensure_default_channel_subscription()
+    try:
+        chat = await bot.get_chat(f"@{CHANNEL_USERNAME}")
+        if chat and getattr(chat, "id", None):
+            cid = int(chat.id)
+            DB.setdefault("settings", {})["channel_id"] = cid
+            subs = DB.setdefault("subscriptions", {})
+            subs[str(cid)] = {
+                "owner_id": "system",
+                "stock": True,
+                "values": True,
+                "type": "channel",
+                "username": CHANNEL_USERNAME,
+                "title": getattr(chat, "title", None) or "LumoNews Shop",
+                "chat_id": cid,
+                "added_at": int(time.time()),
+            }
+            # keep @username entry too
+            subs[f"@{CHANNEL_USERNAME}"] = dict(subs[str(cid)])
+            save_db()
+            log.info("Official channel resolved @%s -> %s", CHANNEL_USERNAME, cid)
+    except Exception as exc:
+        log.warning(
+            "Channel @%s not resolved yet. Add @%s as admin with Post messages. (%s)",
+            CHANNEL_USERNAME, BOT_USERNAME, exc,
+        )
+
+
 async def post_init(app: Application) -> None:
     global MONITOR_STARTED
+    await resolve_official_channel(app.bot)
     if not MONITOR_STARTED:
         MONITOR_STARTED = True
         asyncio.create_task(monitor_loop(app))
+
+
+async def cmd_testchannel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid, _ = remember_user(update)
+    if not is_admin(uid):
+        await safe_reply(update, "⛔️ فقط ادمین.")
+        return
+    await resolve_official_channel(context.bot)
+    target = (DB.get("settings") or {}).get("channel_id") or f"@{CHANNEL_USERNAME}"
+    try:
+        await context.bot.send_message(
+            target,
+            f"✅ تست ارسال LumoNews\n🤖 @{BOT_USERNAME}\n📢 @{CHANNEL_USERNAME}",
+        )
+        await safe_reply(update, f"✅ پیام تست به کانال ارسال شد.\nمقصد: {target}")
+    except Exception as exc:
+        await safe_reply(
+            update,
+            f"❌ ارسال به کانال ناموفق.\n"
+            f"ربات @{BOT_USERNAME} را در @{CHANNEL_USERNAME} ادمین کن و Post messages بده.\n"
+            f"{exc}",
+        )
 
 
 def main() -> None:
     if not TOKEN:
         raise SystemExit("TELEGRAM_BOT_TOKEN missing")
     load_db()
-    log.info("Starting LumoNews Telegram | admins=%s", sorted(ADMIN_IDS) or "(none — use /setadmin)")
+    ensure_default_channel_subscription()
+    log.info(
+        "Starting LumoNews Telegram | bot=@%s channel=@%s admins=%s",
+        BOT_USERNAME,
+        CHANNEL_USERNAME,
+        sorted(ADMIN_IDS) or "(none — use /setadmin)",
+    )
     app = (
         Application.builder()
         .token(TOKEN)
@@ -899,6 +1156,11 @@ def main() -> None:
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
     app.add_handler(CommandHandler("servicereply", cmd_servicereply))
     app.add_handler(CommandHandler("serviceclose", cmd_serviceclose))
+    app.add_handler(CommandHandler("connect", cmd_connect))
+    app.add_handler(CommandHandler("subscribe", cmd_subscribe))
+    app.add_handler(CommandHandler("testchannel", cmd_testchannel))
+    app.add_handler(CommandHandler("mysubs", cmd_mysubs))
+    app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
