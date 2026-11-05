@@ -46,7 +46,7 @@ TOKEN = os.getenv(
 ).strip()
 
 # Comma-separated Telegram numeric user IDs. Empty = first /setadmin claim works once.
-ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "").strip()
+ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "8990071284").strip()
 ADMIN_IDS: set[int] = set()
 for part in ADMIN_IDS_RAW.split(","):
     part = part.strip()
