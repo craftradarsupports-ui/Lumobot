@@ -209,7 +209,8 @@ def halloween_candy_price_table() -> str:
 def main_keyboard(uid: int) -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton("📦 استاک الان"), KeyboardButton("💎 ولیو میوه‌ها")],
-        [KeyboardButton("🛍 خدمات بلاکس فروت"), KeyboardButton("📖 راهنما")],
+        [KeyboardButton("🛍 خدمات بلاکس فروت"), KeyboardButton("🔗 اتصال گپ/چنل")],
+        [KeyboardButton("📢 کانال"), KeyboardButton("📖 راهنما")],
         [KeyboardButton("🆔 آیدی من")],
     ]
     if is_admin(uid):
@@ -254,7 +255,7 @@ def admin_keyboard() -> ReplyKeyboardMarkup:
         [
             [KeyboardButton("📊 آمار"), KeyboardButton("📡 وضعیت")],
             [KeyboardButton("🔄 رفرش استاک"), KeyboardButton("🔄 رفرش ولیو")],
-            [KeyboardButton("📣 پیام سراسری")],
+            [KeyboardButton("📣 پیام سراسری"), KeyboardButton("🧪 تست کانال")],
             [KeyboardButton("🏠 منوی اصلی")],
         ],
         resize_keyboard=True,
@@ -923,7 +924,28 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         save_db()
         await safe_reply(update, "📣 متن پیام سراسری را بفرست.\nبرای لغو: لغو")
         return
-
+    if text in ("🧪 تست کانال",) and is_admin(uid):
+        await cmd_testchannel(update, context)
+        return
+    if text in ("📢 کانال",):
+        await safe_reply(
+            update,
+            f"📢 کانال رسمی LumoNews\n\n@{CHANNEL_USERNAME}\n{CHANNEL_LINK}\n\n🤖 @{BOT_USERNAME}",
+            reply_markup=main_keyboard(uid),
+        )
+        return
+    if text in ("🔗 اتصال گپ/چنل", "اتصال گپ/چنل"):
+        await safe_reply(
+            update,
+            "🔗 اتصال گپ یا کانال برای استاک خودکار\n\n"
+            "۱) ربات را به گپ/کانال اضافه کن\n"
+            "۲) در کانال، ربات را ادمین کن و Post + Delete messages را روشن کن\n"
+            "۳) داخل همان گپ/کانال بفرست:\n/subscribe\n\n"
+            "با تغییر استاک، پست قبلی جایگزین می‌شود و متن داخل باکس کد فرستاده می‌شود.\n"
+            f"کانال رسمی: @{CHANNEL_USERNAME}",
+            reply_markup=main_keyboard(uid),
+        )
+        return
 
 
 async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
