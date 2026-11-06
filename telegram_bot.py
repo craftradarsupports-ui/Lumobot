@@ -362,17 +362,80 @@ async def get_values_struct(force: bool = False) -> dict[str, Any]:
     return structured
 
 
-async def send_chunks_chat(bot, chat_id: Any, chunks: list[str]) -> bool:
+def as_code_block(text: str) -> str:
+    """Wrap text in Telegram monospace code fence (triple backticks)."""
+    fence = chr(96) * 3
+    body = (text or "—").replace(fence, "\"\"\"")
+    body = body[:3900]
+    return fence + chr(10) + body + chr(10) + fence
+
+def sub_record_for_target(target: Any) -> dict[str, Any]:
+    """Get or create subscription record used to track last stock message ids."""
+    subs = DB.setdefault("subscriptions", {})
+    key = str(target)
+    if key in subs and isinstance(subs[key], dict):
+        return subs[key]
+    if isinstance(target, str) and not target.startswith("@"):
+        alt = "@" + target
+        if alt in subs and isinstance(subs[alt], dict):
+            return subs[alt]
+    rec = subs.setdefault(key, {"stock": True, "values": True})
+    if not isinstance(rec, dict):
+        rec = {"stock": True, "values": True}
+        subs[key] = rec
+    return rec
+
+async def delete_previous_stock_messages(bot, chat_id: Any, rec: dict[str, Any]) -> None:
+    ids = rec.get("last_stock_message_ids") or []
+    if not isinstance(ids, list):
+        ids = []
+    for mid in ids:
+        try:
+            await bot.delete_message(chat_id, int(mid))
+        except Exception:
+            try:
+                await bot.edit_message_text(chat_id=chat_id, message_id=int(mid), text="…")
+            except Exception:
+                pass
+    rec["last_stock_message_ids"] = []
+
+async def send_chunks_chat(bot, chat_id: Any, chunks: list[str], *, as_code: bool = False) -> bool:
     ok = True
     for chunk in chunks:
-        body = (chunk or "—")[:4000]
-        # branding
-        body = body.replace("@LumoNews_Bot", f"@{BOT_USERNAME}").replace("@LumoNews", f"@{CHANNEL_USERNAME}")
+        body = chunk or "—"
+        body = body.replace("@LumoNews_Bot", "@" + BOT_USERNAME).replace("@LumoNews", "@" + CHANNEL_USERNAME)
+        if as_code:
+            body = as_code_block(body)
+        else:
+            body = body[:4000]
         try:
             await bot.send_message(chat_id, body)
         except Exception as exc:
             log.warning("send %s failed: %s", chat_id, exc)
             ok = False
+    return ok
+
+async def send_replaceable_stock(bot, chat_id: Any, chunks: list[str]) -> bool:
+    """Post stock in code style and replace previous stock messages in that chat."""
+    rec = sub_record_for_target(chat_id)
+    await delete_previous_stock_messages(bot, chat_id, rec)
+    new_ids = []
+    ok = True
+    for chunk in chunks:
+        body = chunk or "—"
+        body = body.replace("@LumoNews_Bot", "@" + BOT_USERNAME).replace("@LumoNews", "@" + CHANNEL_USERNAME)
+        body = as_code_block(body)
+        try:
+            msg = await bot.send_message(chat_id, body)
+            mid = getattr(msg, "message_id", None)
+            if mid is not None:
+                new_ids.append(int(mid))
+        except Exception as exc:
+            log.warning("stock send %s failed: %s", chat_id, exc)
+            ok = False
+    rec["last_stock_message_ids"] = new_ids
+    rec["last_stock_at"] = int(time.time())
+    save_db()
     return ok
 
 
@@ -542,7 +605,7 @@ async def cmd_stock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         data = await get_stock_cached()
         for chunk in format_stock_message(data):
             body = chunk.replace("@LumoNews_Bot", f"@{BOT_USERNAME}").replace("@LumoNews", f"@{CHANNEL_USERNAME}")
-            await safe_reply(update, body)
+            await safe_reply(update, as_code_block(body))
     except Exception as exc:
         await safe_reply(update, f"⚠️ استاک در دسترس نیست.\n{exc}")
 
@@ -840,7 +903,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             data = await get_stock_cached(force=True)
             for chunk in format_stock_message(data):
-                await safe_reply(update, chunk)
+                body = chunk.replace("@LumoNews_Bot", f"@{BOT_USERNAME}").replace("@LumoNews", f"@{CHANNEL_USERNAME}")
+                await safe_reply(update, as_code_block(body))
         except Exception as exc:
             await safe_reply(update, f"❌ {exc}")
         return
@@ -925,7 +989,7 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     try:
         data = await get_stock_cached(force=True)
         chunks = format_stock_message(data)
-        await send_chunks_chat(context.bot, target, chunks)
+        await send_replaceable_stock(context.bot, target, chunks)
     except Exception as exc:
         log.warning("initial stock to %s: %s", target, exc)
 
@@ -1014,7 +1078,7 @@ async def monitor_loop(app: Application) -> None:
                         targets = collect_broadcast_targets(only_groups_channels=True)
                         ok_n = 0
                         for target in targets:
-                            if await send_chunks_chat(app.bot, target, body):
+                            if await send_replaceable_stock(app.bot, target, body):
                                 ok_n += 1
                         DB["meta"]["stock_signature"] = sig
                         save_db()
