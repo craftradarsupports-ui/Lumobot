@@ -136,6 +136,8 @@ CACHE: dict[str, Any] = {
 }
 
 MONITOR_STARTED = False
+STOCK_BROADCAST_LOCK: asyncio.Lock | None = None
+LAST_STOCK_BROADCAST_SIG = ""
 
 
 def load_db() -> None:
@@ -396,7 +398,20 @@ def sub_record_for_target(target: Any) -> dict[str, Any]:
     return rec
 
 async def delete_previous_stock_messages(bot, chat_id: Any, rec: dict[str, Any]) -> None:
-    ids = rec.get("last_stock_message_ids") or []
+    ids = list(rec.get("last_stock_message_ids") or [])
+    # merge ids from alias records (numeric vs @username for same channel)
+    subs = DB.get("subscriptions") or {}
+    aliases = [chat_id, f"@{CHANNEL_USERNAME}", CHANNEL_USERNAME]
+    ch_id = (DB.get("settings") or {}).get("channel_id")
+    if ch_id is not None:
+        aliases.append(ch_id)
+        aliases.append(str(ch_id))
+    for a in aliases:
+        other = subs.get(str(a)) if not isinstance(a, dict) else None
+        if isinstance(other, dict):
+            for mid in other.get("last_stock_message_ids") or []:
+                if mid not in ids:
+                    ids.append(mid)
     if not isinstance(ids, list):
         ids = []
     for mid in ids:
@@ -408,6 +423,10 @@ async def delete_previous_stock_messages(bot, chat_id: Any, rec: dict[str, Any])
             except Exception:
                 pass
     rec["last_stock_message_ids"] = []
+    for a in aliases:
+        other = subs.get(str(a))
+        if isinstance(other, dict):
+            other["last_stock_message_ids"] = []
 
 async def send_chunks_chat(bot, chat_id: Any, chunks: list[str], *, as_quote: bool = False) -> bool:
     ok = True
@@ -508,6 +527,37 @@ def collect_broadcast_targets(*, only_groups_channels: bool = False) -> list[Any
             if info.get("started") is False:
                 continue
             add(info.get("chat_id") or key)
+    
+    # Deduplicate official channel: prefer numeric id over @username
+    ch_id = (DB.get("settings") or {}).get("channel_id")
+    uname_keys = {f"@{CHANNEL_USERNAME}".lower(), CHANNEL_USERNAME.lower()}
+    if ch_id is not None:
+        filtered = []
+        for t in targets:
+            if isinstance(t, str) and t.lower().lstrip("@") == CHANNEL_USERNAME.lower():
+                continue
+            filtered.append(t)
+        targets = filtered
+        # ensure numeric channel is present
+        try:
+            cid = int(ch_id)
+            if cid not in targets and str(cid) not in {str(x) for x in targets}:
+                targets.insert(0, cid)
+        except (TypeError, ValueError):
+            pass
+    else:
+        # keep only one @channel form
+        seen_ch = False
+        filtered = []
+        for t in targets:
+            if isinstance(t, str) and t.lower().lstrip("@") == CHANNEL_USERNAME.lower():
+                if seen_ch:
+                    continue
+                seen_ch = True
+                filtered.append(t if t.startswith("@") else f"@{t}")
+            else:
+                filtered.append(t)
+        targets = filtered
     return targets
 
 
@@ -1106,17 +1156,36 @@ async def monitor_loop(app: Application) -> None:
                         DB["meta"]["stock_signature"] = sig
                         save_db()
                     elif sig != prev:
-                        chunks = format_stock_message(stock)
-                        prefix = "📈 استاک تغییر کرد!\n"
-                        body = [(prefix + chunks[0])] + chunks[1:]
-                        targets = collect_broadcast_targets(only_groups_channels=True)
-                        ok_n = 0
-                        for target in targets:
-                            if await send_replaceable_stock(app.bot, target, body):
-                                ok_n += 1
-                        DB["meta"]["stock_signature"] = sig
-                        save_db()
-                        log.info("Stock change broadcast done targets=%s ok=%s", len(targets), ok_n)
+                        global LAST_STOCK_BROADCAST_SIG, STOCK_BROADCAST_LOCK
+                        if STOCK_BROADCAST_LOCK is None:
+                            STOCK_BROADCAST_LOCK = asyncio.Lock()
+                        async with STOCK_BROADCAST_LOCK:
+                            # re-check under lock to avoid double send
+                            prev2 = (DB.get("meta") or {}).get("stock_signature")
+                            if sig == prev2 or sig == LAST_STOCK_BROADCAST_SIG:
+                                pass
+                            else:
+                                LAST_STOCK_BROADCAST_SIG = sig
+                                DB["meta"]["stock_signature"] = sig
+                                save_db()
+                                chunks = format_stock_message(stock)
+                                prefix = "📈 استاک تغییر کرد!\n"
+                                body = [(prefix + chunks[0])] + list(chunks[1:])
+                                targets = collect_broadcast_targets(only_groups_channels=True)
+                                # unique by string key
+                                uniq = []
+                                seen_t = set()
+                                for t in targets:
+                                    k = str(t).lower()
+                                    if k in seen_t:
+                                        continue
+                                    seen_t.add(k)
+                                    uniq.append(t)
+                                ok_n = 0
+                                for target in uniq:
+                                    if await send_replaceable_stock(app.bot, target, body):
+                                        ok_n += 1
+                                log.info("Stock change broadcast done targets=%s ok=%s", len(uniq), ok_n)
             except Exception as exc:
                 log.warning("stock monitor: %s", exc)
 
