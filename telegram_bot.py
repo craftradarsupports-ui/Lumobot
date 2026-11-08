@@ -13,6 +13,9 @@ from typing import Any
 from telegram import (
     KeyboardButton,
     ReplyKeyboardMarkup,
+    WebAppInfo,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     Update,
 )
 from telegram.ext import (
@@ -48,6 +51,7 @@ TOKEN = os.getenv(
 BOT_USERNAME = os.getenv("BOT_USERNAME", "LumoTel_Bot").lstrip("@")
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "LumoNews_Shop").lstrip("@")
 CHANNEL_LINK = f"https://t.me/{CHANNEL_USERNAME}"
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://scriptx.ir/lumoNews/").rstrip("/") + "/"
 
 # Main admin (owner). Extra IDs via ADMIN_IDS env (comma-separated).
 ADMIN_IDS: set[int] = {8990071284}
@@ -210,6 +214,7 @@ def halloween_candy_price_table() -> str:
 
 def main_keyboard(uid: int) -> ReplyKeyboardMarkup:
     rows = [
+        [KeyboardButton("🌐 ورود به سایت", web_app=WebAppInfo(url=WEBAPP_URL))],
         [KeyboardButton("📦 استاک الان"), KeyboardButton("💎 ولیو میوه‌ها")],
         [KeyboardButton("🛍 خدمات بلاکس فروت"), KeyboardButton("🔗 اتصال گپ/چنل")],
         [KeyboardButton("📢 کانال"), KeyboardButton("📖 راهنما")],
@@ -291,6 +296,24 @@ SERVICE_BUTTONS = {
     "🤝 واسطه رایگان": ("middleman", "واسطه‌گری رایگان"),
 }
 
+
+
+def main_menu_keyboard() -> ReplyKeyboardMarkup:
+    """Modern reply keyboard — open site via Mini App button (not raw link)."""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("🌐 ورود به سایت", web_app=WebAppInfo(url=WEBAPP_URL))],
+            [KeyboardButton("📦 استاک"), KeyboardButton("💎 ولیوها")],
+            [KeyboardButton("🛠️ خدمات"), KeyboardButton("📢 کانال")],
+            [KeyboardButton("ℹ️ راهنما")],
+        ],
+        resize_keyboard=True,
+    )
+
+def site_inline_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🚀 باز کردن LumoNews", web_app=WebAppInfo(url=WEBAPP_URL))]]
+    )
 
 async def safe_reply(update: Update, text: str, **kwargs) -> None:
     if not update.effective_message:
@@ -905,10 +928,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if text in ("🆔 آیدی من",):
         await cmd_id(update, context)
         return
-    if text in ("📦 استاک الان", "استاک"):
+    if text in ("📦 استاک الان", "📦 استاک", "استاک"):
         await cmd_stock(update, context)
         return
-    if text in ("💎 ولیو میوه‌ها", "ولیو", "ولیوها"):
+    if text in ("💎 ولیو میوه‌ها", "💎 ولیوها", "ولیو", "ولیوها"):
         await cmd_values(update, context)
         return
     if text in ("💎 دائمی",):
